@@ -5,6 +5,10 @@ import math
 from pydub import AudioSegment
 from pydub.exceptions import CouldntDecodeError
 
+# --- State Management ---
+if 'transcription_result' not in st.session_state:
+    st.session_state.transcription_result = None
+
 # --- Transcription Logic ---
 def transcribe_audio(client, file_path, model, prompt):
     """
@@ -50,7 +54,7 @@ def transcribe_audio(client, file_path, model, prompt):
              num_chunks = 1
         status_ui.write(f"Splitting into {num_chunks} chunks.")
 
-        progress_bar = st.progress(0)
+        progress_bar = st.progress(0, text="Initializing transcription...")
 
         # 4. Split, Export, and Transcribe Chunks
         for i in range(num_chunks):
@@ -63,7 +67,10 @@ def transcribe_audio(client, file_path, model, prompt):
             chunk_filename = f"temp_chunk_{i}.{CHUNK_EXPORT_FORMAT}"
             temp_chunk_files.append(chunk_filename)
 
-            status_ui.update(label=f"Processing chunk {i+1}/{num_chunks} ({start_ms/1000:.2f}s to {end_ms/1000:.2f}s)...")
+            progress_text = f"Processing chunk {i+1}/{num_chunks} ({start_ms/1000:.2f}s to {end_ms/1000:.2f}s)..."
+            status_ui.update(label=progress_text)
+            progress_bar.progress((i + 1) / num_chunks, text=progress_text)
+
 
             try:
                 # Export chunk
@@ -100,21 +107,21 @@ def transcribe_audio(client, file_path, model, prompt):
                 st.error(f"An unexpected error occurred processing chunk {i+1}: {e}")
                 status_ui.write(f"  Skipping chunk {i+1} due to an unexpected error.")
 
-            progress_bar.progress((i + 1) / num_chunks)
 
         status_ui.update(label="Transcription complete!", state="complete", expanded=False)
+        st.session_state.transcription_result = final_transcript.strip()
+
 
     except CouldntDecodeError:
-        st.error(f"ERROR: pydub failed to load or decode the audio file: '{os.path.basename(file_path)}'. Please ensure it's a valid, uncorrupted audio file.")
+        st.error(f"ERROR: pydub failed to load or decode the audio file: '{os.path.basename(file_path)}'. Please ensure it's a valid, uncorrupted audio file supported by FFmpeg.")
         status_ui.update(label="Error processing audio.", state="error")
-        return ""
     except Exception as e:
         st.error(f"An error occurred during the main transcription process: {e}")
         status_ui.update(label="An unexpected error occurred.", state="error")
-        return ""
     finally:
         # 6. Clean up temporary files
         cleaned_count = 0
+        status_ui.write("Cleaning up temporary chunk files...")
         for temp_file in temp_chunk_files:
             try:
                 if os.path.exists(temp_file):
@@ -123,9 +130,8 @@ def transcribe_audio(client, file_path, model, prompt):
             except OSError as e:
                 st.warning(f"Could not remove temporary file '{temp_file}': {e}")
         if cleaned_count > 0:
-            st.info(f"Cleaned up {cleaned_count} temporary chunk files.")
+            status_ui.write(f"Cleanup complete. Removed {cleaned_count} temporary files.")
 
-    return final_transcript.strip()
 
 
 # --- Streamlit UI ---
@@ -133,14 +139,33 @@ st.set_page_config(page_title="Audio Transcription", page_icon="🎙️", layout
 st.title("Audio Transcription with OpenAI")
 
 st.markdown("""
-This app transcribes audio files using OpenAI's transcription models.
-It handles large files by automatically splitting them into smaller chunks.
+This app transcribes large audio files using OpenAI's transcription models.
+1.  **Enter your API key** in the sidebar.
+2.  **Upload your audio file**.
+3.  **Click "Transcribe Audio"** to begin.
+
+The app automatically handles splitting the audio into manageable chunks for the API.
 """)
 
 # --- Sidebar for Inputs ---
 with st.sidebar:
     st.header("Configuration")
-    api_key = st.text_input("Enter your OpenAI API key:", type="password")
+    api_key = st.text_input("Enter your OpenAI API key:", type="password", help="You can get your key from https://platform.openai.com/api-keys")
+
+    if not api_key:
+        st.warning("Please enter your OpenAI API key to proceed.")
+        st.stop()
+        
+    try:
+        client = openai.OpenAI(api_key=api_key)
+        client.models.list() # Test the key
+    except openai.AuthenticationError:
+        st.error("The provided OpenAI API key is invalid or has expired.")
+        st.stop()
+    except Exception as e:
+        st.error(f"An error occurred while validating the API key: {e}")
+        st.stop()
+
 
     st.subheader("1. Upload Audio File")
     uploaded_file = st.file_uploader(
@@ -155,47 +180,43 @@ with st.sidebar:
         index=0,
         help="The model names from the original script are included. If they don't work, `whisper-1` is the standard model for transcription."
     )
-    prompt = st.text_area("Prompt (optional)", help="A prompt to guide the model's style or to provide context.")
+    prompt = st.text_area("Prompt (optional)", help="A prompt to guide the model's style or to provide context. For example, you can provide names or technical terms.")
 
 
 # --- Main App Logic ---
 if uploaded_file is None:
-    st.info("Please upload an audio file to get started.")
+    st.info("Please upload an audio file using the sidebar to get started.")
 else:
     st.audio(uploaded_file, format=uploaded_file.type)
     
-    if st.button("Transcribe Audio", type="primary"):
-        if not api_key:
-            st.error("Please enter your OpenAI API key in the sidebar to proceed.")
-        else:
-            temp_file_path = None
-            try:
-                client = openai.OpenAI(api_key=api_key)
-                
-                # Save uploaded file to a temporary path
-                temp_dir = "temp_uploads"
-                if not os.path.exists(temp_dir):
-                    os.makedirs(temp_dir)
-                temp_file_path = os.path.join(temp_dir, uploaded_file.name)
-                with open(temp_file_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
+    if st.button("Transcribe Audio", type="primary", use_container_width=True):
+        st.session_state.transcription_result = None # Clear previous results
+        temp_file_path = None
+        try:
+            # Save uploaded file to a temporary path
+            temp_dir = "temp_uploads"
+            if not os.path.exists(temp_dir):
+                os.makedirs(temp_dir)
+            temp_file_path = os.path.join(temp_dir, uploaded_file.name)
+            with open(temp_file_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
 
-                final_transcript = transcribe_audio(client, temp_file_path, model_id, prompt)
+            transcribe_audio(client, temp_file_path, model_id, prompt)
 
-                if final_transcript:
-                    st.subheader("Final Transcription")
-                    st.text_area("", final_transcript, height=400)
-                    st.download_button(
-                        label="Download Transcript",
-                        data=final_transcript,
-                        file_name=f"{os.path.splitext(uploaded_file.name)[0]}_transcript.txt",
-                        mime="text/plain"
-                    )
+        except Exception as e:
+            st.error(f"An error occurred before transcription could start: {e}")
+        finally:
+            # Clean up the uploaded file
+            if temp_file_path and os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
 
-            except Exception as e:
-                st.error(f"An error occurred: {e}")
-            finally:
-                # Clean up the uploaded file
-                if temp_file_path and os.path.exists(temp_file_path):
-                    os.remove(temp_file_path)
-                    st.info(f"Cleaned up temporary uploaded file: {os.path.basename(temp_file_path)}") 
+if st.session_state.transcription_result:
+    st.subheader("Final Transcription")
+    st.text_area("", st.session_state.transcription_result, height=400)
+    st.download_button(
+        label="Download Transcript",
+        data=st.session_state.transcription_result,
+        file_name=f"transcript.txt",
+        mime="text/plain",
+        use_container_width=True
+    ) 
