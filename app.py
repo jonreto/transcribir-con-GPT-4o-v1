@@ -150,7 +150,14 @@ The app automatically handles splitting the audio into manageable chunks for the
 # --- Sidebar for Inputs ---
 with st.sidebar:
     st.header("Configuration")
-    api_key = st.text_input("Enter your OpenAI API key:", type="password", help="You can get your key from https://platform.openai.com/api-keys")
+    
+    # Check for API key in Streamlit secrets first
+    api_key = st.secrets.get("OPENAI_API_KEY")
+
+    if api_key:
+        st.success("OpenAI API key found in secrets! 🤫")
+    else:
+        api_key = st.text_input("Enter your OpenAI API key:", type="password", help="You can get your key from https://platform.openai.com/api-keys")
 
     if not api_key:
         st.warning("Please enter your OpenAI API key to proceed.")
